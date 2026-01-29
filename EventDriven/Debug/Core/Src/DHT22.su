@@ -1,0 +1,5 @@
+../Core/Src/DHT22.c:10:6:delay_us	16	static
+../Core/Src/DHT22.c:15:6:DHT_Start	24	static
+../Core/Src/DHT22.c:32:9:DHT_Check_Response	16	static
+../Core/Src/DHT22.c:44:9:DHT_Read	16	static
+../Core/Src/DHT22.c:60:9:DHT_GetData	24	static

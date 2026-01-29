@@ -1,0 +1,4 @@
+../Core/Src/SHT3X.c:10:6:SHT31_SendCommand	1
+../Core/Src/SHT3X.c:17:6:SHT31_Init	1
+../Core/Src/SHT3X.c:23:6:I2C_ResetBus	1
+../Core/Src/SHT3X.c:29:9:SHT31_ReadData	2

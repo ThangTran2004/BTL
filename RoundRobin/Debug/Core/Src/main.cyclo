@@ -1,0 +1,11 @@
+../Core/Src/main.c:107:5:main	2
+../Core/Src/main.c:192:6:SystemClock_Config	4
+../Core/Src/main.c:236:6:StartTaskSHT	6
+../Core/Src/main.c:268:6:StartTaskLCD	2
+../Core/Src/main.c:303:6:StartTaskUART	8
+../Core/Src/main.c:336:6:StartTaskADC	4
+../Core/Src/main.c:367:6:StartTaskDHT	3
+../Core/Src/main.c:393:6:HAL_UART_RxCpltCallback	5
+../Core/Src/main.c:406:6:HAL_UART_ErrorCallback	2
+../Core/Src/main.c:422:6:HAL_TIM_PeriodElapsedCallback	2
+../Core/Src/main.c:440:6:Error_Handler	1
