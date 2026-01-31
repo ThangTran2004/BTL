@@ -39,6 +39,7 @@ typedef enum {
     EVENT_GAS_READ,
 	EVENT_TEMP_READ,
 	EVENT_LCD,
+	EVENT_ISR,
     EVENT_UART_CONTINUE,
 } Event_t;
 
@@ -104,54 +105,20 @@ Event_t Pop_Event(void) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART1) {
-        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-
         // Kiểm tra ký tự kết thúc lệnh
         if (rx_byte == '\n' || rx_byte == '\r') {
             if (rx_index > 0) {
                 rx_buffer[rx_index] = '\0'; // Kết thúc chuỗi an toàn
-
-                // Xử lý lệnh SET_PERIOD
-                if (strstr((char*)rx_buffer, "SET_PERIOD") != NULL) {
-                    char target[10] = {0};
-                    int val = 0;
-                    // Dùng %s thay cho %[...:] để test nếu sscanf cũ quá khắt khe
-                    if (sscanf((char*)rx_buffer, "SET_PERIOD:%4[^:]:%d", target, &val) == 2) {
-                        if (strcmp(target, "ADC") == 0) {
-                            period_ADC = (uint16_t)val;
-                            timer_ADC = 0;
-                            HAL_UART_Transmit(&huart1, (uint8_t*)"ADC OK\r\n", 8, 10);
-                        } else if (strcmp(target, "DHT") == 0 || strcmp(target, "SENSOR") == 0) {
-                            period_temp = (uint16_t)val;
-                            timer_temp = 0;
-                            HAL_UART_Transmit(&huart1, (uint8_t*)"TEMP OK\r\n", 9, 10);
-                        }
-                    }
-                }
-                // Xử lý lệnh MODE
-                else if (strstr((char*)rx_buffer, "MODE:SHT") != NULL) {
-                    flag = 0;
-                    HAL_UART_Transmit(&huart1, (uint8_t*)"MODE SHT\r\n", 10, 10);
-                }
-                else if (strstr((char*)rx_buffer, "MODE:DHT") != NULL) {
-                    flag = 1;
-                    HAL_UART_Transmit(&huart1, (uint8_t*)"MODE DHT\r\n", 10, 10);
-                }
-
-                // Reset bộ đệm sau khi xử lý bất kể lệnh đúng hay sai
-                rx_index = 0;
-                memset((uint8_t*)rx_buffer, 0, sizeof(rx_buffer));
+                Push_Event(EVENT_ISR); // Đẩy task xử lý lệnh vào hàng đợi
             }
         }
         else {
-            // Loại bỏ các ký tự rác không in được (ngoại trừ ký tự in được từ Space đến ~)
             if (rx_byte >= 32 && rx_byte <= 126) {
                 if (rx_index < (sizeof(rx_buffer) - 1)) {
                     rx_buffer[rx_index++] = rx_byte;
                 }
             }
         }
-
         HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
     }
 }
@@ -225,6 +192,40 @@ void Task_LCD(void) {
     lcd_put_cur(1, 0);
     snprintf(buf, sizeof(buf), "Gas: %lu", ADC_val);
     lcd_send_string(buf);
+}
+void Task_ISR(void) {
+    // Xử lý lệnh SET_PERIOD
+    if (strstr((char*)rx_buffer, "SET_PERIOD") != NULL) {
+        char target[10] = {0};
+        int val = 0;
+        if (sscanf((char*)rx_buffer, "SET_PERIOD:%9[^:]:%d", target, &val) == 2) {
+            if (strcmp(target, "ADC") == 0) {
+                period_ADC = (uint16_t)val;
+                timer_ADC = 0;
+                HAL_UART_Transmit(&huart1, (uint8_t*)"ADC OK\r\n", 8, 10);
+            } else if (strcmp(target, "DHT") == 0 || strcmp(target, "SENSOR") == 0) {
+                period_temp = (uint16_t)val;
+                timer_temp = 0;
+                HAL_UART_Transmit(&huart1, (uint8_t*)"TEMP OK\r\n", 9, 10);
+            }
+        }
+    }
+    // Xử lý lệnh MODE
+    else if (strstr((char*)rx_buffer, "MODE:SHT") != NULL) {
+        flag = 0;
+        HAL_UART_Transmit(&huart1, (uint8_t*)"MODE SHT\r\n", 10, 10);
+    }
+    else if (strstr((char*)rx_buffer, "MODE:DHT") != NULL) {
+        flag = 1;
+        HAL_UART_Transmit(&huart1, (uint8_t*)"MODE DHT\r\n", 10, 10);
+    }
+
+    // Quan trọng: Giải phóng buffer để nhận lệnh tiếp theo
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    rx_index = 0;
+    memset((uint8_t*)rx_buffer, 0, sizeof(rx_buffer));
+    __set_PRIMASK(primask);
 }
 /* USER CODE END PFP */
 
@@ -339,7 +340,9 @@ int main(void)
                     Task_LCD();
                     break;
 
-                // case EVENT_UART_COMMAND: có thể xóa bỏ vì đã xử lý trong ngắt
+                case EVENT_ISR:
+                	Task_ISR();
+                	break;
                 default: break;
             }
         } else {
