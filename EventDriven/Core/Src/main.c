@@ -40,12 +40,11 @@ typedef enum {
 	EVENT_TEMP_READ,
 	EVENT_LCD,
     EVENT_UART_CONTINUE,
-    EVENT_UART_COMMAND
 } Event_t;
 
 #define EVENT_QUEUE_SIZE 15
 volatile Event_t event_queue[EVENT_QUEUE_SIZE];
-volatile int8_t head = 0, tail = 0;
+volatile int8_t qhead = 0, qtail = 0;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -61,7 +60,15 @@ volatile int8_t head = 0, tail = 0;
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-volatile uint8_t Rx_byte;       // Byte nhận từ UART
+volatile uint8_t rx_buffer[50];
+volatile uint8_t rx_index = 0;
+volatile uint8_t rx_byte;
+volatile uint16_t period_ADC = 1000;
+volatile uint16_t period_temp = 3000;
+volatile uint16_t period_LCD = 4000;
+volatile uint16_t timer_ADC = 0;
+volatile uint16_t timer_temp = 0;
+volatile uint16_t timer_LCD = 0;
 char uart_tx_buf[32];
 volatile uint8_t uart_step = 0; // Trạng thái phân nhỏ UART
 uint32_t ADC_val = 0;
@@ -79,43 +86,85 @@ void Push_Event(Event_t event) {
     uint32_t primask = __get_PRIMASK();
     __disable_irq(); // Khóa ngắt tạm thời
 
-    int8_t next_tail = (tail + 1) % EVENT_QUEUE_SIZE;
-    if (next_tail != head) {
-        event_queue[tail] = event;
-        tail = next_tail;
+    int8_t next_tail = (qtail + 1) % EVENT_QUEUE_SIZE;
+    if (next_tail != qhead) {
+        event_queue[qtail] = event;
+        qtail = next_tail;
     }
 
     __set_PRIMASK(primask); // Khôi phục trạng thái ngắt
 }
 
 Event_t Pop_Event(void) {
-    if (head == tail) return EVENT_NONE;
-    Event_t event = event_queue[head];
-    head = (head + 1) % EVENT_QUEUE_SIZE;
+    if (qhead == qtail) return EVENT_NONE;
+    Event_t event = event_queue[qhead];
+    qhead = (qhead + 1) % EVENT_QUEUE_SIZE;
     return event;
 }
-/* Hàm này chạy khi nhận xong 1 byte */
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART1) {
-        Push_Event(EVENT_UART_COMMAND);
-        HAL_UART_Receive_IT(&huart1, (uint8_t*)&Rx_byte, 1);
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+
+        // Kiểm tra ký tự kết thúc lệnh
+        if (rx_byte == '\n' || rx_byte == '\r') {
+            if (rx_index > 0) {
+                rx_buffer[rx_index] = '\0'; // Kết thúc chuỗi an toàn
+
+                // Xử lý lệnh SET_PERIOD
+                if (strstr((char*)rx_buffer, "SET_PERIOD") != NULL) {
+                    char target[10] = {0};
+                    int val = 0;
+                    // Dùng %s thay cho %[...:] để test nếu sscanf cũ quá khắt khe
+                    if (sscanf((char*)rx_buffer, "SET_PERIOD:%4[^:]:%d", target, &val) == 2) {
+                        if (strcmp(target, "ADC") == 0) {
+                            period_ADC = (uint16_t)val;
+                            timer_ADC = 0;
+                            HAL_UART_Transmit(&huart1, (uint8_t*)"ADC OK\r\n", 8, 10);
+                        } else if (strcmp(target, "DHT") == 0 || strcmp(target, "SENSOR") == 0) {
+                            period_temp = (uint16_t)val;
+                            timer_temp = 0;
+                            HAL_UART_Transmit(&huart1, (uint8_t*)"TEMP OK\r\n", 9, 10);
+                        }
+                    }
+                }
+                // Xử lý lệnh MODE
+                else if (strstr((char*)rx_buffer, "MODE:SHT") != NULL) {
+                    flag = 0;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"MODE SHT\r\n", 10, 10);
+                }
+                else if (strstr((char*)rx_buffer, "MODE:DHT") != NULL) {
+                    flag = 1;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"MODE DHT\r\n", 10, 10);
+                }
+
+                // Reset bộ đệm sau khi xử lý bất kể lệnh đúng hay sai
+                rx_index = 0;
+                memset((uint8_t*)rx_buffer, 0, sizeof(rx_buffer));
+            }
+        }
+        else {
+            // Loại bỏ các ký tự rác không in được (ngoại trừ ký tự in được từ Space đến ~)
+            if (rx_byte >= 32 && rx_byte <= 126) {
+                if (rx_index < (sizeof(rx_buffer) - 1)) {
+                    rx_buffer[rx_index++] = rx_byte;
+                }
+            }
+        }
+
+        HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
     }
 }
 
-/* Hàm kiểm tra và sửa lỗi Overrun  */
 void Check_UART_Error(UART_HandleTypeDef *huart) {
-    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE)) {
-        __HAL_UART_CLEAR_OREFLAG(huart);
-        HAL_UART_Receive_IT(huart, (uint8_t*)&Rx_byte, 1);
-    }
-}
-void Handle_PC_Command(uint8_t cmd) {
-    if (cmd == 'S') {
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-        flag = 1;
-    } else if (cmd == 'D') {
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
-        flag = 0;
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) != RESET) {
+        __HAL_UART_CLEAR_OREFLAG(huart); // Xóa cờ lỗi Overrun
+
+        // Kích hoạt lại việc nhận ngắt vì khi có lỗi ORE, HAL sẽ dừng nhận dữ liệu
+        HAL_UART_Receive_IT(huart, (uint8_t*)&rx_byte, 1);
+
+        // Debug: Nháy LED hoặc gửi chuỗi báo lỗi để biết hệ thống vừa bị tràn
+        //HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
     }
 }
 void Task_ADC(void){
@@ -129,16 +178,23 @@ void Task_UART_Segmented(void) {
     static uint8_t pos = 0;
     uint8_t len = strlen(uart_tx_buf);
 
-    // Mỗi đoạn gửi 8 ký tự để không chặn CPU lâu
+    if (len == 0) {
+        pos = 0;
+        return;
+    }
+
     uint8_t chunk = (len - pos > 8) ? 8 : (len - pos);
 
-    if (len > 0 && pos < len) {
-        HAL_UART_Transmit(&huart1, (uint8_t*)&uart_tx_buf[pos], chunk, 10);
-        pos += chunk;
-        Push_Event(EVENT_UART_CONTINUE);
+    if (pos < len) {
+        if (HAL_UART_Transmit(&huart1, (uint8_t*)&uart_tx_buf[pos], chunk, 10) == HAL_OK) {
+            pos += chunk;
+            Push_Event(EVENT_UART_CONTINUE);
+        }
     } else {
+        // QUAN TRỌNG: Gửi xong phải xóa sạch dấu vết
         pos = 0;
-        uart_tx_buf[0] = '\0'; // Xóa buffer sau khi gửi xong
+        uart_tx_buf[0] = '\0'; // Đánh dấu buffer trống
+        memset(uart_tx_buf, 0, sizeof(uart_tx_buf));
     }
 }
 void Task_Read_Sensor(void) {
@@ -176,21 +232,25 @@ void Task_LCD(void) {
 /* USER CODE BEGIN 0 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM2) {
-        static uint32_t counter = 0;
-        counter++;
+        timer_ADC++;
+        timer_temp++;
+        timer_LCD++;
 
-        if (counter % 3000 == 0 && counter != 0) {
-            Push_Event(EVENT_GAS_READ);
-        }
-
-        if (counter % 4000 == 0 && counter != 0) {
+        if (timer_ADC >= period_ADC) {
+                    // Kiểm tra xem hàng đợi có còn chỗ không trước khi đẩy
+                    int8_t next_tail = (qtail + 1) % EVENT_QUEUE_SIZE;
+                    if (next_tail != qhead) {
+                        Push_Event(EVENT_GAS_READ);
+                    }
+                    timer_ADC = 0;
+                }
+        if (timer_temp >= period_temp) {
             Push_Event(EVENT_TEMP_READ);
+            timer_temp = 0;
         }
-        if (counter % 10000 == 0) {
-        	Push_Event(EVENT_LCD);
-        }
-        if (counter >= 60000){
-        	counter = 0;
+        if (timer_LCD >= period_LCD) {
+            Push_Event(EVENT_LCD);
+            timer_LCD = 0;
         }
     }
 }
@@ -232,65 +292,60 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   SHT31_Init();
+  lcd_init ();
   HAL_TIM_Base_Start_IT(&htim2); // Ngắt 1ms
-  HAL_UART_Receive_IT(&huart1, (uint8_t*)&Rx_byte, 1);
+  HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
   HAL_DBGMCU_EnableDBGSleepMode();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
-	  // Kiểm tra lỗi UART liên tục để đảm bảo không bị "treo" bộ nhận
-	  Check_UART_Error(&huart1);
+    {
+        Check_UART_Error(&huart1);
+        Event_t current_e = Pop_Event();
 
-	  Event_t current_e = Pop_Event();
+        if (current_e != EVENT_NONE) {
+            switch(current_e) {
+                case EVENT_GAS_READ:
+                    // Chỉ nạp dữ liệu nếu buffer truyền đang trống
+                    if (uart_tx_buf[0] == '\0') {
+                        Task_ADC();
+                        snprintf(uart_tx_buf, sizeof(uart_tx_buf), "ADC: %lu\r\n", ADC_val);
+                        Push_Event(EVENT_UART_CONTINUE);
+                    }
+                    else{
+                    	Push_Event(EVENT_GAS_READ);
+                    }
+                    break;
 
-	  if (current_e != EVENT_NONE) {
-		  switch(current_e){
-	              case EVENT_GAS_READ:
-	            	  Task_ADC();
-	            	  snprintf(uart_tx_buf, sizeof(uart_tx_buf), "ADC: %lu\r\n", ADC_val);
-	            	  Push_Event(EVENT_UART_CONTINUE);
-	            	  break;
+                case EVENT_TEMP_READ:
+                    if (uart_tx_buf[0] == '\0') {
+                        Task_Read_Sensor();
+                        const char* name = (flag == 0) ? "SHT31" : "DHT22";
+                        snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%s: %.1f C\r\n", name, t);
+                        Push_Event(EVENT_UART_CONTINUE);
+                    }
+                    else{
+                    	Push_Event(EVENT_TEMP_READ);
+                    }
+                    break;
 
-	              case EVENT_TEMP_READ:
-	            	  if (uart_tx_buf[0] == '\0'){
-	            		  Task_Read_Sensor();
-	            		  if(status) {
-	            			  const char* sensor_name = (flag == 0) ? "SHT31" : "DHT22";
-	            			  snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%s: %.1f C\r\n", sensor_name, t);
-	            		  } else {
-	            			  snprintf(uart_tx_buf, sizeof(uart_tx_buf), "Sensor Error!\r\n");
-	            		  }
-	            		  Push_Event(EVENT_UART_CONTINUE);
-	            	  } else {
-	            		  Push_Event(EVENT_TEMP_READ);
-	            		                  }
-	            	  break;
+                case EVENT_UART_CONTINUE:
+                    Task_UART_Segmented();
+                    break;
 
-	              case EVENT_UART_CONTINUE:
-	            	  Task_UART_Segmented();
-	            	  break;
+                case EVENT_LCD:
+                    Task_LCD();
+                    break;
 
-	              case EVENT_LCD:
-	            	  Task_LCD(); // Cập nhật LCD mỗi 10s
-	            	  break;
-	              case EVENT_UART_COMMAND:
-	            	  Handle_PC_Command(Rx_byte);
-	            	  break;
-	              default: // Thêm cái này để xử lý EVENT_NONE và các giá trị khác
-	            	  break;
-	              }
-	  }
-	  else {
-	              // Ngủ khi hết việc. Ngắt Timer/UART sẽ đánh thức CPU.
-		  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-	          }
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-  }
+                // case EVENT_UART_COMMAND: có thể xóa bỏ vì đã xử lý trong ngắt
+                default: break;
+            }
+        } else {
+            HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+        }
+    }
   /* USER CODE END 3 */
 }
 

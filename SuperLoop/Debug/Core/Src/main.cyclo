@@ -1,0 +1,8 @@
+../Core/Src/main.c:74:6:Task_ADC	2
+../Core/Src/main.c:81:6:Task_Read_Sensor	2
+../Core/Src/main.c:93:6:Task_UART	2
+../Core/Src/main.c:101:6:Task_LCD	2
+../Core/Src/main.c:124:5:main	3
+../Core/Src/main.c:185:6:SystemClock_Config	4
+../Core/Src/main.c:228:6:HAL_UART_RxCpltCallback	13
+../Core/Src/main.c:283:6:Error_Handler	1

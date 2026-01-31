@@ -71,13 +71,21 @@ osThreadId_t TaskLCDHandle;
 osThreadId_t TaskUARTHandle;
 osThreadId_t TaskADCHandle;
 osThreadId_t TaskDHTHandle;
+osThreadId_t TaskCommandHandle;
 osMessageQueueId_t uartQueueHandle;
 osMessageQueueId_t lcdQueueHandle;
 osMutexId_t I2CMutexHandle;
 osMutexId_t DataMutexHandle;
+osMutexId_t UARTMutexHandle;
 osEventFlagsId_t uartEventHandle;
 
+volatile uint32_t period_SHT  = 3000;
+volatile uint32_t period_DHT  = 3000;
+volatile uint32_t period_ADC  = 1000;
+volatile uint32_t period_LCD  = 4000;
 uint32_t ADC_Val;
+uint8_t rx_cmd_buf[32];
+uint8_t rx_cmd_idx = 0;
 uint8_t rx_byte;
 uint8_t mode=0;
 float last_temp = 0.0f;
@@ -93,6 +101,7 @@ void StartTaskLCD(void *argument);
 void StartTaskUART(void *argument);
 void StartTaskADC(void *argument);
 void StartTaskDHT(void *argument);
+void StartTaskCommand(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -141,6 +150,7 @@ int main(void)
   // Tạo các đối tượng RTOS
   I2CMutexHandle = osMutexNew(NULL);
   DataMutexHandle= osMutexNew(NULL);
+  UARTMutexHandle= osMutexNew(NULL);
   uartEventHandle = osEventFlagsNew(NULL);
   uartQueueHandle = osMessageQueueNew(20, sizeof(Message_t), NULL);
   osKernelInitialize();
@@ -154,15 +164,21 @@ int main(void)
       .stack_size = 256 * 4,
       .priority = osPriorityNormal // Cao hơn để ưu tiên in dữ liệu
   };
-  TaskSHTHandle  = osThreadNew(StartTaskSHT,  NULL, &rr_attributes);
-  TaskLCDHandle  = osThreadNew(StartTaskLCD,  NULL, &uart_attributes);
-  TaskUARTHandle = osThreadNew(StartTaskUART, NULL, &uart_attributes);
+  const osThreadAttr_t command_attributes = {
+    .name = "TaskCommand",
+    .stack_size = 256 * 4,
+    .priority = (osPriority_t) osPriorityNormal,
+  };
   TaskADCHandle = osThreadNew(StartTaskADC, NULL, &rr_attributes);
   TaskDHTHandle = osThreadNew(StartTaskDHT, NULL, &rr_attributes);
+  TaskSHTHandle  = osThreadNew(StartTaskSHT,  NULL, &rr_attributes);
+  TaskUARTHandle = osThreadNew(StartTaskUART, NULL, &uart_attributes);
+  TaskLCDHandle  = osThreadNew(StartTaskLCD,  NULL, &uart_attributes);
+  TaskCommandHandle = osThreadNew(StartTaskCommand, NULL, &command_attributes);
   osThreadSuspend(TaskDHTHandle);
-  if (TaskADCHandle == NULL) {
+  if (TaskCommandHandle == NULL) {
       // Nếu nhảy vào đây, chắc chắn là do hết Heap RAM
-      HAL_UART_Transmit(&huart1, (uint8_t*)"ADC Task Creation Failed!\r\n", 27, 100);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"ISR Task Creation Failed!\r\n", 27, 100);
   }
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
   /* USER CODE END 2 */
@@ -232,7 +248,7 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-// --- TASK 1: DHT (Chạy xen kẽ mỗi 3s) ---
+// --- TASK : DHT (Chạy xen kẽ mỗi 3s) ---
 void StartTaskSHT(void *argument) {
     float t, h;
     Message_t msg;
@@ -260,11 +276,11 @@ void StartTaskSHT(void *argument) {
     		}
     		osMutexRelease(I2CMutexHandle);
     	}
-        osDelayUntil(tick+3000);
+        osDelayUntil(tick+period_SHT);
     }
 }
 
-// --- TASK 2: LCD (Bảo vệ bởi Mutex) ---
+// --- TASK : LCD (Bảo vệ bởi Mutex) ---
 void StartTaskLCD(void *argument) {
     char str_buf[16];
     float t_display;
@@ -272,7 +288,7 @@ void StartTaskLCD(void *argument) {
     uint32_t tick = osKernelGetTickCount();
     osDelay(100);
     for(;;) {
-    	tick+=10000;
+    	tick+=period_LCD;
         // 1. Lấy dữ liệu mới nhất từ kho lưu trữ
         osMutexAcquire(DataMutexHandle, osWaitForever);
         t_display = last_temp;
@@ -299,40 +315,31 @@ void StartTaskLCD(void *argument) {
     }
 }
 
-// --- TASK 3: UART ---
+// --- TASK : UART ---
 void StartTaskUART(void *argument) {
     Message_t received_msg;
-    char str[50];
-    uint32_t flags = 0x00;
+    char str[64];
     for(;;) {
-    	flags = osEventFlagsWait(uartEventHandle,0x08, osFlagsWaitAny, 10);
-    	if (flags == 0x08) {
-    	    char msg[] = "Mode changed successfully!\r\n";
-    	    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
-    	}
-        if (osMessageQueueGet(uartQueueHandle, &received_msg, NULL, 10) == osOK) {
-            int temp_val = (int)(received_msg.value * 100);
-            int v_int = temp_val / 100;
-            int v_dec = temp_val % 100;
+        if (osMessageQueueGet(uartQueueHandle, &received_msg, NULL, osWaitForever) == osOK) {
 
-            // Xử lý số âm cho phần thập phân (nếu có)
-            if (v_dec < 0) v_dec = -v_dec;
-
-            switch(received_msg.source) {
-                case SOURCE_ADC:
-                    sprintf(str, "[ADC] Val: %d\r\n", (int)received_msg.value);
-                    break;
-                case SOURCE_SHT_TEMP:
-                    sprintf(str, "[SHT] Temp: %d.%02d C\r\n", v_int, v_dec);
-                    break;
-                case SOURCE_DHT_TEMP:
-                	sprintf(str, "[DHT] Temp: %d.%02d C\r\n", v_int, v_dec);
+            int len = 0;
+            if (received_msg.source == SOURCE_ADC) {
+                len = sprintf(str, "[ADC] Gas: %d\r\n", (int)received_msg.value);
+            } else if (received_msg.source == SOURCE_SHT_TEMP) {
+                len = sprintf(str, "[SHT] Temp: %.2f C\r\n", received_msg.value);
+            } else if (received_msg.source == SOURCE_DHT_TEMP) {
+                len = sprintf(str, "[DHT] Temp: %.2f C\r\n", received_msg.value);
             }
-            HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), 100);
+
+            // Bảo vệ Mutex UART khi in
+            if (osMutexAcquire(UARTMutexHandle, osWaitForever) == osOK) {
+                HAL_UART_Transmit(&huart1, (uint8_t*)str, len, 100);
+                osMutexRelease(UARTMutexHandle);
+            }
         }
     }
 }
-// --- TASK 4: ADC ---
+// --- TASK : ADC ---
 void StartTaskADC(void *argument) {
     Message_t msg_adc;
     uint32_t local_adc_val;
@@ -340,7 +347,7 @@ void StartTaskADC(void *argument) {
     uint32_t tick = osKernelGetTickCount();
     for(;;) {
         // Sử dụng osDelayUntil để giữ nhịp chính xác 2 giây
-        tick += 4000;
+        tick += period_ADC;
 
         if (HAL_ADC_Start(&hadc1) == HAL_OK) {
             if(HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
@@ -386,27 +393,77 @@ void StartTaskDHT(void *argument) {
             osMessageQueuePut(uartQueueHandle, &msg, 0, 10);
         }
 
-        osDelayUntil(tick+3000);
+        osDelayUntil(tick+period_DHT);
+    }
+}
+// --- Task Command xử lý lệnh từ UART ---
+void StartTaskCommand(void *argument) {
+    int val;
+    char target_name[20]; // Dùng để lưu tên task vừa thay đổi để in DONE
+
+    for(;;) {
+        // Chờ tín hiệu từ ngắt UART (Semaphore/Notification)
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        strcpy(target_name, "UNKNOWN"); // Mặc định
+
+        // 1. Xử lý đổi Mode
+        if (strcmp((char*)rx_cmd_buf, "MODE:SHT") == 0) {
+            mode = 0;
+            strcpy(target_name, "MODE SHT");
+            osEventFlagsSet(uartEventHandle, 0x08);
+        }
+        else if (strcmp((char*)rx_cmd_buf, "MODE:DHT") == 0) {
+            mode = 1;
+            strcpy(target_name, "MODE DHT");
+            osEventFlagsSet(uartEventHandle, 0x08);
+        }
+        // 2. Xử lý thay đổi chu kỳ (Ví dụ lệnh ADC:2000)
+        else if (sscanf((char*)rx_cmd_buf, "ADC:%d", &val) == 1) {
+            period_ADC = (uint32_t)val;
+            strcpy(target_name, "ADC");
+        }
+        else if (sscanf((char*)rx_cmd_buf, "SHT:%d", &val) == 1) {
+            period_SHT = (uint32_t)val;
+            strcpy(target_name, "SHT");
+        }
+        else if (sscanf((char*)rx_cmd_buf, "LCD:%d", &val) == 1) {
+            period_LCD = (uint32_t)val;
+            strcpy(target_name, "LCD");
+        }
+
+        // 3. Phản hồi qua UART (Có bảo vệ Mutex)
+        if (osMutexAcquire(UARTMutexHandle, 100) == osOK) {
+            char msg[40];
+            int len = sprintf(msg, ">> %s OK\n", target_name);
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, 100);
+            osMutexRelease(UARTMutexHandle);
+        }
+
+        // 4. Reset buffer an toàn (Dùng Critical Section để tránh ngắt chen vào)
+        taskENTER_CRITICAL();
+        memset(rx_cmd_buf, 0, sizeof(rx_cmd_buf));
+        rx_cmd_idx = 0;
+        taskEXIT_CRITICAL();
     }
 }
 // --- CALLBACK NGẮT UART ---
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART1) {
-        if (rx_byte == 'S' || rx_byte == 'D') {
-            osEventFlagsSet(uartEventHandle, 0x08); // Chỉ set khi đúng lệnh
-            if (rx_byte == 'S') mode = 0;
-            else mode = 1;
-            rx_byte=0;
+        // Nếu nhận ký tự kết thúc
+        if (rx_byte == '\n' || rx_byte == '\r') {
+            if (rx_cmd_idx > 0) {
+                rx_cmd_buf[rx_cmd_idx] = '\0'; // Kết thúc chuỗi
+                vTaskNotifyGiveFromISR((TaskHandle_t)TaskCommandHandle, NULL);
+            }
+            rx_cmd_idx = 0;
+        } else {
+            if (rx_cmd_idx < sizeof(rx_cmd_buf) - 1) {
+                rx_cmd_buf[rx_cmd_idx++] = rx_byte;
+            }
         }
+        // Tiếp tục nhận byte tiếp theo
         HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
-    }
-}
-
-// --- XỬ LÝ LỖI OVERRUN (Bắt buộc khi dùng UART ngắt) ---
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-    if (huart->Instance == USART1) {
-        __HAL_UART_CLEAR_OREFLAG(huart);
-        HAL_UART_Receive_IT(huart, &rx_byte, 1);
     }
 }
 /* USER CODE END 4 */
