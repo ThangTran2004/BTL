@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "queue.h"
 #include "I2CLCD.h"
 #include "adc.h"
 #include "i2c.h"
@@ -73,9 +74,9 @@ osThreadId_t TaskADCHandle;
 osThreadId_t TaskDHTHandle;
 osThreadId_t TaskCommandHandle;
 osMessageQueueId_t uartQueueHandle;
-osMessageQueueId_t lcdQueueHandle;
+osMessageQueueId_t mailboxTempHandle;
+osMessageQueueId_t mailboxADCHandle;
 osMutexId_t I2CMutexHandle;
-osMutexId_t DataMutexHandle;
 osMutexId_t UARTMutexHandle;
 osEventFlagsId_t uartEventHandle;
 
@@ -88,8 +89,7 @@ uint8_t rx_cmd_buf[32];
 uint8_t rx_cmd_idx = 0;
 uint8_t rx_byte;
 uint8_t mode=0;
-float last_temp = 0.0f;
-uint32_t last_adc;
+const osMessageQueueAttr_t mailbox_attributes = { .name = "Mailbox" };
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,10 +149,11 @@ int main(void)
   SHT31_Init();
   // Tạo các đối tượng RTOS
   I2CMutexHandle = osMutexNew(NULL);
-  DataMutexHandle= osMutexNew(NULL);
   UARTMutexHandle= osMutexNew(NULL);
   uartEventHandle = osEventFlagsNew(NULL);
   uartQueueHandle = osMessageQueueNew(20, sizeof(Message_t), NULL);
+  mailboxTempHandle = osMessageQueueNew(1, sizeof(float), &mailbox_attributes);
+  mailboxADCHandle  = osMessageQueueNew(1, sizeof(uint32_t), &mailbox_attributes);
   osKernelInitialize();
 
   // Định nghĩa thuộc tính chung (Cùng Priority để chạy Round Robin)
@@ -162,7 +163,7 @@ int main(void)
   };
   const osThreadAttr_t uart_attributes = {
       .stack_size = 256 * 4,
-      .priority = osPriorityNormal // Cao hơn để ưu tiên in dữ liệu
+      .priority = osPriorityNormal
   };
   const osThreadAttr_t command_attributes = {
     .name = "TaskCommand",
@@ -248,7 +249,7 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-// --- TASK : DHT (Chạy xen kẽ mỗi 3s) ---
+// --- TASK : SHT ---
 void StartTaskSHT(void *argument) {
     float t, h;
     Message_t msg;
@@ -266,10 +267,7 @@ void StartTaskSHT(void *argument) {
     	osDelay(20);
     	if (osMutexAcquire(I2CMutexHandle, 10) == osOK){
     		if(SHT31_GetResult(&t, &h)==1){
-    			if(osMutexAcquire(DataMutexHandle,10)== osOK){
-    				last_temp=t;
-    				osMutexRelease(DataMutexHandle);
-    			}
+    			xQueueOverwrite((QueueHandle_t)mailboxTempHandle, &t);
     			msg.source = SOURCE_SHT_TEMP;
     			msg.value = t;
     			osMessageQueuePut(uartQueueHandle, &msg, 0, 10);
@@ -280,20 +278,18 @@ void StartTaskSHT(void *argument) {
     }
 }
 
-// --- TASK : LCD (Bảo vệ bởi Mutex) ---
+// --- TASK : LCD ---
 void StartTaskLCD(void *argument) {
     char str_buf[16];
-    float t_display;
-    uint32_t adc_display;
+    float current_t = 0;
+    uint32_t current_adc = 0;
     uint32_t tick = osKernelGetTickCount();
     osDelay(100);
     for(;;) {
     	tick+=period_LCD;
         // 1. Lấy dữ liệu mới nhất từ kho lưu trữ
-        osMutexAcquire(DataMutexHandle, osWaitForever);
-        t_display = last_temp;
-        adc_display = last_adc;
-        osMutexRelease(DataMutexHandle);
+        xQueuePeek((QueueHandle_t)mailboxTempHandle, &current_t, 0);
+        xQueuePeek((QueueHandle_t)mailboxADCHandle, &current_adc, 0);
 
         // 2. Hiển thị lên LCD
         if (osMutexAcquire(I2CMutexHandle, osWaitForever) == osOK) {
@@ -301,12 +297,12 @@ void StartTaskLCD(void *argument) {
 
             // Dòng 1: Nhiệt độ
             lcd_put_cur(0, 0);
-            sprintf(str_buf, "Temp: %.1f C", t_display);
+            sprintf(str_buf, "Temp: %.1f C", current_t);
             lcd_send_string(str_buf);
 
             // Dòng 2: ADC
             lcd_put_cur(1, 0);
-            sprintf(str_buf, "Gas: %lu", adc_display);
+            sprintf(str_buf, "Gas: %lu", current_adc);
             lcd_send_string(str_buf);
 
             osMutexRelease(I2CMutexHandle);
@@ -346,16 +342,12 @@ void StartTaskADC(void *argument) {
     HAL_ADCEx_Calibration_Start(&hadc1);
     uint32_t tick = osKernelGetTickCount();
     for(;;) {
-        // Sử dụng osDelayUntil để giữ nhịp chính xác 2 giây
         tick += period_ADC;
 
         if (HAL_ADC_Start(&hadc1) == HAL_OK) {
             if(HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
                 local_adc_val = HAL_ADC_GetValue(&hadc1);
-                if(osMutexAcquire(DataMutexHandle,10)==osOK){
-                	last_adc = local_adc_val;
-                	osMutexRelease(DataMutexHandle);
-                }
+                xQueueOverwrite((QueueHandle_t)mailboxADCHandle, &local_adc_val);
                 msg_adc.source = SOURCE_ADC;
                 msg_adc.value = (float)local_adc_val;
                 osMessageQueuePut(uartQueueHandle, &msg_adc, 0, 10);
@@ -384,10 +376,7 @@ void StartTaskDHT(void *argument) {
         tick = osKernelGetTickCount();
 
         if (DHT22_Read(&myDHT22, &dht_data) == 0) {
-            osMutexAcquire(DataMutexHandle, 10);
-            last_temp = dht_data.Temperature;
-            osMutexRelease(DataMutexHandle);
-
+            xQueueOverwrite((QueueHandle_t)mailboxTempHandle, &dht_data.Temperature);
             msg.source = SOURCE_DHT_TEMP;
             msg.value = dht_data.Temperature;
             osMessageQueuePut(uartQueueHandle, &msg, 0, 10);
@@ -431,6 +420,10 @@ void StartTaskCommand(void *argument) {
             period_LCD = (uint32_t)val;
             strcpy(target_name, "LCD");
         }
+        else if (sscanf((char*)rx_cmd_buf, "DHT:%d", &val) == 1) {
+        	period_DHT = (uint32_t)val;
+        	strcpy(target_name, "DHT");
+        }
 
         // 3. Phản hồi qua UART (Có bảo vệ Mutex)
         if (osMutexAcquire(UARTMutexHandle, 100) == osOK) {
@@ -440,7 +433,6 @@ void StartTaskCommand(void *argument) {
             osMutexRelease(UARTMutexHandle);
         }
 
-        // 4. Reset buffer an toàn (Dùng Critical Section để tránh ngắt chen vào)
         taskENTER_CRITICAL();
         memset(rx_cmd_buf, 0, sizeof(rx_cmd_buf));
         rx_cmd_idx = 0;

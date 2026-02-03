@@ -38,6 +38,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h \
  ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h \
+ ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h \
+ ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h \
  ../Core/Inc/I2CLCD.h ../Core/Inc/adc.h ../Core/Inc/main.h \
  ../Core/Inc/i2c.h ../Core/Inc/tim.h ../Core/Inc/usart.h \
  ../Core/Inc/SHT3X.h ../Core/Inc/DHT22.h ../Core/Inc/gpio.h
@@ -81,6 +83,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h:
 ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.h:
+../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h:
+../Middlewares/Third_Party/FreeRTOS/Source/include/task.h:
 ../Core/Inc/I2CLCD.h:
 ../Core/Inc/adc.h:
 ../Core/Inc/main.h:

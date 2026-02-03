@@ -71,7 +71,6 @@ volatile uint16_t timer_ADC = 0;
 volatile uint16_t timer_temp = 0;
 volatile uint16_t timer_LCD = 0;
 char uart_tx_buf[32];
-volatile uint8_t uart_step = 0; // Trạng thái phân nhỏ UART
 uint32_t ADC_val = 0;
 float t, h;
 char lcd_line1[16];
@@ -141,36 +140,19 @@ void Task_ADC(void){
     }
     HAL_ADC_Stop(&hadc1);
 }
-void Task_UART_Segmented(void) {
-    static uint8_t pos = 0;
+void Task_UART(void) {
     uint8_t len = strlen(uart_tx_buf);
-
-    if (len == 0) {
-        pos = 0;
-        return;
-    }
-
-    uint8_t chunk = (len - pos > 8) ? 8 : (len - pos);
-
-    if (pos < len) {
-        if (HAL_UART_Transmit(&huart1, (uint8_t*)&uart_tx_buf[pos], chunk, 10) == HAL_OK) {
-            pos += chunk;
-            Push_Event(EVENT_UART_CONTINUE);
+    if (len > 0) {
+        if (HAL_UART_Transmit(&huart1, (uint8_t*)uart_tx_buf, len, 100) == HAL_OK) {
+            uart_tx_buf[0] = '\0';
+            memset(uart_tx_buf, 0, sizeof(uart_tx_buf));
         }
-    } else {
-        // QUAN TRỌNG: Gửi xong phải xóa sạch dấu vết
-        pos = 0;
-        uart_tx_buf[0] = '\0'; // Đánh dấu buffer trống
-        memset(uart_tx_buf, 0, sizeof(uart_tx_buf));
     }
 }
 void Task_Read_Sensor(void) {
     if (flag == 0) {
-        // Đọc SHT3x
         status = SHT31_ReadData(&t, &h);
     } else {
-        // Đọc DHT22
-        // Lưu ý: DHT22 cần khóa ngắt để đảm bảo timing chính xác
         __disable_irq();
         status = DHT_GetData(&t, &h);
         __enable_irq();
@@ -194,13 +176,12 @@ void Task_LCD(void) {
     lcd_send_string(buf);
 }
 void Task_ISR(void) {
-    // Xử lý lệnh SET_PERIOD
     if (strstr((char*)rx_buffer, "SET_PERIOD") != NULL) {
         char target[10] = {0};
         int val = 0;
         if (sscanf((char*)rx_buffer, "SET_PERIOD:%9[^:]:%d", target, &val) == 2) {
-            if (strcmp(target, "ADC") == 0) {
-                period_ADC = (uint16_t)val;
+        	if (strcmp(target, "ADC") == 0) {
+        		period_ADC = (uint16_t)val;
                 timer_ADC = 0;
                 HAL_UART_Transmit(&huart1, (uint8_t*)"ADC OK\r\n", 8, 10);
             } else if (strcmp(target, "DHT") == 0 || strcmp(target, "SENSOR") == 0) {
@@ -210,7 +191,6 @@ void Task_ISR(void) {
             }
         }
     }
-    // Xử lý lệnh MODE
     else if (strstr((char*)rx_buffer, "MODE:SHT") != NULL) {
         flag = 0;
         HAL_UART_Transmit(&huart1, (uint8_t*)"MODE SHT\r\n", 10, 10);
@@ -219,8 +199,6 @@ void Task_ISR(void) {
         flag = 1;
         HAL_UART_Transmit(&huart1, (uint8_t*)"MODE DHT\r\n", 10, 10);
     }
-
-    // Quan trọng: Giải phóng buffer để nhận lệnh tiếp theo
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
     rx_index = 0;
@@ -302,53 +280,47 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-    {
-        Check_UART_Error(&huart1);
-        Event_t current_e = Pop_Event();
+      {
+	  Check_UART_Error(&huart1);
+	  Event_t current_e = Pop_Event();
 
-        if (current_e != EVENT_NONE) {
-            switch(current_e) {
-                case EVENT_GAS_READ:
-                    // Chỉ nạp dữ liệu nếu buffer truyền đang trống
-                    if (uart_tx_buf[0] == '\0') {
-                        Task_ADC();
-                        snprintf(uart_tx_buf, sizeof(uart_tx_buf), "ADC: %lu\r\n", ADC_val);
-                        Push_Event(EVENT_UART_CONTINUE);
-                    }
-                    else{
-                    	Push_Event(EVENT_GAS_READ);
-                    }
-                    break;
+	  if (current_e != EVENT_NONE) {
+		  switch(current_e) {
+		  case EVENT_GAS_READ:
+			  if (uart_tx_buf[0] == '\0') {
+				  Task_ADC();
+				  snprintf(uart_tx_buf, sizeof(uart_tx_buf), "ADC: %lu\r\n", ADC_val);
+				  Task_UART();
+			  } else {
+				  Push_Event(EVENT_GAS_READ);
+			  }
+			  break;
 
-                case EVENT_TEMP_READ:
-                    if (uart_tx_buf[0] == '\0') {
-                        Task_Read_Sensor();
-                        const char* name = (flag == 0) ? "SHT31" : "DHT22";
-                        snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%s: %.1f C\r\n", name, t);
-                        Push_Event(EVENT_UART_CONTINUE);
-                    }
-                    else{
-                    	Push_Event(EVENT_TEMP_READ);
-                    }
-                    break;
+		  case EVENT_TEMP_READ:
+			  if (uart_tx_buf[0] == '\0') {
+				  Task_Read_Sensor();
+				  const char* name = (flag == 0) ? "SHT31" : "DHT22";
+				  snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%s: %.1f C\r\n", name, t);
+				  Task_UART();
+			  } else {
+				  Push_Event(EVENT_TEMP_READ);
+			  }
+			  break;
 
-                case EVENT_UART_CONTINUE:
-                    Task_UART_Segmented();
-                    break;
+		  case EVENT_LCD:
+			  Task_LCD();
+			  break;
 
-                case EVENT_LCD:
-                    Task_LCD();
-                    break;
+		  case EVENT_ISR:
+			  Task_ISR();
+			  break;
 
-                case EVENT_ISR:
-                	Task_ISR();
-                	break;
-                default: break;
-            }
-        } else {
-            HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-        }
-    }
+		  default: break;
+		  }
+	  } else {
+		  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+	  }
+      }
   /* USER CODE END 3 */
 }
 

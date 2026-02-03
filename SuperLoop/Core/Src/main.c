@@ -84,7 +84,6 @@ void Task_Read_Sensor(void) {
         status = SHT31_ReadData(&t, &h);
     } else {
         // Đọc DHT22
-        // Lưu ý: DHT22 cần khóa ngắt để đảm bảo timing chính xác
         __disable_irq();
         status = DHT_GetData(&t, &h);
         __enable_irq();
@@ -227,27 +226,20 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART1) {
-        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-
-        // 1. Nhận diện ký tự kết thúc lệnh
         if (rx_byte == '\n' || rx_byte == '\r') {
             if (rx_index > 0) {
-                rx_buffer[rx_index] = '\0'; // Kết thúc chuỗi
-
-                // 2. Xử lý lệnh SET_PERIOD
+                rx_buffer[rx_index] = '\0';
                 if (strstr((char*)rx_buffer, "SET_PERIOD") != NULL) {
-                    char target[10] = {0}; // Khai báo biến target
+                    char target[10] = {0};
                     int val = 0;
-
                     if (sscanf((char*)rx_buffer, "SET_PERIOD:%9[^:]:%d", target, &val) == 2) {
                         if (strcmp(target, "ALL") == 0) {
-                            P = (uint16_t)val;  // Cập nhật chu kỳ tổng
-                            t0 = HAL_GetTick(); // Reset mốc thời gian để đồng bộ lại ngay
+                            P = (uint16_t)val;
+                            t0 = HAL_GetTick();
                             HAL_UART_Transmit(&huart1, (uint8_t*)"ALL PERIOD UPDATED\r\n", 20, 10);
                         }
                     }
                 }
-                // 3. Xử lý lệnh MODE
                 else if (strstr((char*)rx_buffer, "MODE:SHT") != NULL) {
                     flag = 0;
                     HAL_UART_Transmit(&huart1, (uint8_t*)"MODE SHT\r\n", 10, 10);
@@ -256,21 +248,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
                     flag = 1;
                     HAL_UART_Transmit(&huart1, (uint8_t*)"MODE DHT\r\n", 10, 10);
                 }
-
-                // 4. Reset bộ đệm nhận
                 rx_index = 0;
                 memset((uint8_t*)rx_buffer, 0, sizeof(rx_buffer));
             }
         }
         else {
-            // Lưu các ký tự in được vào bộ đệm
             if (rx_byte >= 32 && rx_byte <= 126) {
                 if (rx_index < (sizeof(rx_buffer) - 1)) {
                     rx_buffer[rx_index++] = rx_byte;
                 }
             }
         }
-        // 5. Tiếp tục đợi byte tiếp theo
         HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
     }
 }
