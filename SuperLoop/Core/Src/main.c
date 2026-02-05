@@ -40,7 +40,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+DHT22_HandleTypeDef dht;
+DHT22_Data_t dht_data;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,7 +56,7 @@ volatile uint32_t ADC_val = 0;
 float t = 0, h = 0;
 uint8_t status = 0;
 uint8_t flag = 0; // 0: SHT31, 1: DHT22
-volatile uint32_t P = 2000;
+volatile uint32_t P = 3000;
 volatile int t0;
 char uart_tx_buf[100];
 uint8_t rx_byte;
@@ -84,9 +85,17 @@ void Task_Read_Sensor(void) {
         status = SHT31_ReadData(&t, &h);
     } else {
         // Đọc DHT22
-        __disable_irq();
-        status = DHT_GetData(&t, &h);
-        __enable_irq();
+        //__disable_irq();
+    	int res = DHT22_Read(&dht, &dht_data);
+        if(res==0){
+        	status = 1;
+        	t = dht_data.Temperature;
+        }
+        else{
+        	int len = snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%d", res);
+        	HAL_UART_Transmit(&huart1, (uint8_t*)uart_tx_buf, len, 100);
+        }
+        //__enable_irq();
     }
 }
 void Task_UART(void) {
@@ -152,6 +161,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   lcd_init();
   SHT31_Init();
+  dht.htim = &htim1;
+  dht.GPIOx = GPIOA;
+  dht.GPIO_Pin = GPIO_PIN_2;
+  DHT22_Init(&dht);
+  HAL_TIM_Base_Start(&htim1);
   HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
   /* USER CODE END 2 */
 
@@ -160,7 +174,8 @@ int main(void)
   t0 = HAL_GetTick();
   while (1)
   {
-	  if(HAL_GetTick() % P == t0){
+	  if(HAL_GetTick() - t0 >= P){
+		  t0 = HAL_GetTick();
 		  Task_ADC();
 		  Task_Read_Sensor();
 		  Task_UART();

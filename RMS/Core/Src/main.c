@@ -137,6 +137,7 @@ void RMS_UpdatePriority(void) {
         osThreadSetPriority(rmsTasks[i].handle, newPri);
     }
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -175,8 +176,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   SHT31_Init();
   lcd_init();
-  DHT22_Init(&myDHT22);
   HAL_TIM_Base_Start(myDHT22.htim);
+  DHT22_Init(&myDHT22);
   I2CMutexHandle = osMutexNew(NULL);
   UARTMutexHandle= osMutexNew(NULL);
   uartEventHandle = osEventFlagsNew(NULL);
@@ -215,18 +216,18 @@ int main(void)
   //MX_FREERTOS_Init();
   TaskADCHandle = osThreadNew(StartTaskADC, NULL, &adc_attributes);
   TaskDHTHandle = osThreadNew(StartTaskDHT, NULL, &temp_attributes);
-  TaskSHTHandle  = osThreadNew(StartTaskSHT,  NULL, &temp_attributes);
+  TaskSHTHandle = osThreadNew(StartTaskSHT, NULL, &temp_attributes);
   TaskUARTHandle = osThreadNew(StartTaskUART, NULL, &uart_attributes);
-  TaskLCDHandle  = osThreadNew(StartTaskLCD,  NULL, &lcd_attributes);
+  TaskLCDHandle = osThreadNew(StartTaskLCD, NULL, &lcd_attributes);
   TaskCommandHandle = osThreadNew(StartTaskCommand, NULL, &command_attributes);
   osThreadSuspend(TaskDHTHandle);
   if (TaskCommandHandle == NULL) {
-        // Nếu nhảy vào đây, chắc chắn là do hết Heap RAM
-	  HAL_UART_Transmit(&huart1, (uint8_t*)"ISR Task Creation Failed!\r\n", 27, 100);
-    }
-  rmsTasks[0] = (RMS_Task_t){"ADC",  TaskADCHandle,  &period_ADC};
-  rmsTasks[1] = (RMS_Task_t){"SHT",  TaskSHTHandle,  &period_SHT};
-  rmsTasks[2] = (RMS_Task_t){"LCD",  TaskLCDHandle,  &period_LCD};
+  // Nếu nhảy vào đây, chắc chắn là do hết Heap RAM
+  HAL_UART_Transmit(&huart1, (uint8_t*)"ISR Task Creation Failed!\r\n", 27, 100);
+  }
+  rmsTasks[0] = (RMS_Task_t){"ADC", TaskADCHandle, &period_ADC};
+  rmsTasks[1] = (RMS_Task_t){"SHT", TaskSHTHandle, &period_SHT};
+  rmsTasks[2] = (RMS_Task_t){"LCD", TaskLCDHandle, &period_LCD};
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
   /* Start scheduler */
   osKernelStart();
@@ -257,10 +258,13 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -270,17 +274,17 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
-  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV2;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
@@ -406,21 +410,29 @@ void StartTaskDHT(void *argument) {
     DHT22_Data_t dht_data;
     Message_t msg;
     uint32_t tick ;
-
+    int status;
     for(;;) {
     	if(mode==0){
     		osThreadResume(TaskSHTHandle);
     		osThreadSuspend(TaskDHTHandle);
     	}
         tick = osKernelGetTickCount();
-
-        if (DHT22_Read(&myDHT22, &dht_data) == 0) {
+        status = DHT22_Read(&myDHT22, &dht_data);
+        if (status== 0) {
             xQueueOverwrite((QueueHandle_t)mailboxTempHandle, &dht_data.Temperature);
             msg.source = SOURCE_DHT_TEMP;
             msg.value = dht_data.Temperature;
             osMessageQueuePut(uartQueueHandle, &msg, 0, 10);
         }
-
+        else{
+        	char str[64];
+        	int len = 0;
+        	len = sprintf(str, "%d\r\n", (int)status);
+        	if (osMutexAcquire(UARTMutexHandle, osWaitForever) == osOK) {
+        	                HAL_UART_Transmit(&huart1, (uint8_t*)str, len, 100);
+        	                osMutexRelease(UARTMutexHandle);
+        }
+        }
         osDelayUntil(tick+period_DHT);
     }
 }

@@ -1,5 +1,5 @@
 #include "dht22.h"
-#include "cmsis_os.h" // Bắt buộc: Để dùng osDelay và taskENTER_CRITICAL
+#include "cmsis_os.h"
 
 // --- CÁC HÀM NỘI BỘ (STATIC) ---
 
@@ -20,7 +20,7 @@ static void DHT22_SetPinInput(DHT22_HandleTypeDef *dht) {
 }
 
 // Hàm delay micro-giây dùng Timer phần cứng
-// Yêu cầu: Timer này PHẢI được Start trong main() trước khi dùng
+
 static void delay_us(DHT22_HandleTypeDef *dht, uint16_t us) {
     __HAL_TIM_SET_COUNTER(dht->htim, 0);
     while (__HAL_TIM_GET_COUNTER(dht->htim) < us);
@@ -38,10 +38,7 @@ int DHT22_Read(DHT22_HandleTypeDef *dht, DHT22_Data_t *data) {
     uint8_t byteIndex = 0, bitIndex = 7;
     uint32_t timeout = 0;
 
-    /* =========================================
-       GIAI ĐOẠN 1: GỬI TÍN HIỆU START
-       (Không cần khóa ngắt, dùng osDelay để không chiếm CPU)
-       ========================================= */
+    /*  GIAI ĐOẠN 1: GỬI TÍN HIỆU START */
 
     DHT22_SetPinOutput(dht);
     HAL_GPIO_WritePin(dht->GPIOx, dht->GPIO_Pin, GPIO_PIN_RESET);

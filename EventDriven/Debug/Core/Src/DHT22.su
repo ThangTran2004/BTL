@@ -1,5 +1,5 @@
-../Core/Src/DHT22.c:10:6:delay_us	16	static
-../Core/Src/DHT22.c:15:6:DHT_Start	24	static
-../Core/Src/DHT22.c:32:9:DHT_Check_Response	16	static
-../Core/Src/DHT22.c:44:9:DHT_Read	16	static
-../Core/Src/DHT22.c:60:9:DHT_GetData	24	static
+../Core/Src/DHT22.c:3:13:DHT22_SetPinOutput	32	static
+../Core/Src/DHT22.c:12:13:DHT22_SetPinInput	32	static
+../Core/Src/DHT22.c:21:13:delay_us	16	static
+../Core/Src/DHT22.c:26:6:DHT22_Init	16	static
+../Core/Src/DHT22.c:31:5:DHT22_Read	40	static

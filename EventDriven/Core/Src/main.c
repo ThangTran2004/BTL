@@ -42,7 +42,8 @@ typedef enum {
 	EVENT_ISR,
     EVENT_UART_CONTINUE,
 } Event_t;
-
+DHT22_HandleTypeDef dht;
+DHT22_Data_t dht_data;
 #define EVENT_QUEUE_SIZE 15
 volatile Event_t event_queue[EVENT_QUEUE_SIZE];
 volatile int8_t qhead = 0, qtail = 0;
@@ -153,9 +154,15 @@ void Task_Read_Sensor(void) {
     if (flag == 0) {
         status = SHT31_ReadData(&t, &h);
     } else {
-        __disable_irq();
-        status = DHT_GetData(&t, &h);
-        __enable_irq();
+    	int res = DHT22_Read(&dht, &dht_data);
+        if(res==0){
+        	status = 1;
+        	t = dht_data.Temperature;
+        }
+        else{
+        	int len = snprintf(uart_tx_buf, sizeof(uart_tx_buf), "%d", res);
+        	HAL_UART_Transmit(&huart1, (uint8_t*)uart_tx_buf, len, 100);
+        }
     }
 }
 void Task_LCD(void) {
@@ -273,6 +280,11 @@ int main(void)
   SHT31_Init();
   lcd_init ();
   HAL_TIM_Base_Start_IT(&htim2); // Ngắt 1ms
+  HAL_TIM_Base_Start(&htim1);
+  dht.htim = &htim1;
+  dht.GPIOx = GPIOA;
+  dht.GPIO_Pin = GPIO_PIN_2;
+  DHT22_Init(&dht);
   HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
   HAL_DBGMCU_EnableDBGSleepMode();
   /* USER CODE END 2 */

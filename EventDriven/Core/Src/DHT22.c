@@ -1,85 +1,94 @@
-/*
- * DHT22.c
- *
- *  Created on: Jan 29, 2026
- *      Author: THANGTRAN
- */
-#include "DHT22.h"
+#include "dht22.h"
 
-// Hàm delay micro giây sử dụng Timer 1
-void delay_us (uint16_t us) {
-    __HAL_TIM_SET_COUNTER(&htim1, 0);
-    while (__HAL_TIM_GET_COUNTER(&htim1) < us);
-}
-
-void DHT_Start (void) {
+static void DHT22_SetPinOutput(DHT22_HandleTypeDef *dht) {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = DHT_PIN;
+
+    GPIO_InitStruct.Pin = dht->GPIO_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(DHT_PORT, &GPIO_InitStruct);
+    HAL_GPIO_Init(dht->GPIOx, &GPIO_InitStruct);
+}
 
-    HAL_GPIO_WritePin (DHT_PORT, DHT_PIN, 0);
-    HAL_Delay (1);   // DHT22 chỉ cần chờ 1ms (khác với DHT11 cần 18ms)
-    HAL_GPIO_WritePin (DHT_PORT, DHT_PIN, 1);
-    delay_us (30);
+static void DHT22_SetPinInput(DHT22_HandleTypeDef *dht) {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+    GPIO_InitStruct.Pin = dht->GPIO_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(DHT_PORT, &GPIO_InitStruct);
+    HAL_GPIO_Init(dht->GPIOx, &GPIO_InitStruct);
 }
 
-uint8_t DHT_Check_Response (void) {
-    uint8_t Response = 0;
-    delay_us (40);
-    if (!(HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN))) {
-        delay_us (80);
-        if ((HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN))) Response = 1;
-        else Response = 0;
+static void delay_us(DHT22_HandleTypeDef *dht, uint16_t us) {
+    __HAL_TIM_SET_COUNTER(dht->htim, 0);
+    while (__HAL_TIM_GET_COUNTER(dht->htim) < us);
+}
+
+void DHT22_Init(DHT22_HandleTypeDef *dht) {
+    DHT22_SetPinOutput(dht);
+    HAL_GPIO_WritePin(dht->GPIOx, dht->GPIO_Pin, GPIO_PIN_SET);
+}
+
+int DHT22_Read(DHT22_HandleTypeDef *dht, DHT22_Data_t *data) {
+    uint8_t bits[5] = {0};
+    uint8_t byteIndex = 0, bitIndex = 7;
+    uint32_t timeout = 0;
+
+    // Start signal
+    DHT22_SetPinOutput(dht);
+    HAL_GPIO_WritePin(dht->GPIOx, dht->GPIO_Pin, GPIO_PIN_RESET);
+    HAL_Delay(2);  // 1 ms – 2 ms
+    HAL_GPIO_WritePin(dht->GPIOx, dht->GPIO_Pin, GPIO_PIN_SET);
+
+    DHT22_SetPinInput(dht);
+    delay_us(dht, 30);
+
+    // Wait for DHT response (LOW)
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(dht->GPIOx, dht->GPIO_Pin) == GPIO_PIN_SET) {
+        if (timeout++ > 10000) return 1;
+        delay_us(dht, 1);
     }
-    while ((HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN)));
-    return Response;
-}
 
-uint8_t DHT_Read (void) {
-    uint8_t i, j;
-    for (j=0; j<8; j++) {
-        while (!(HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN)));
-        delay_us (40);
-        if (!(HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN))) {
-            i &= ~(1<<(7-j));
+    // Wait for HIGH
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(dht->GPIOx, dht->GPIO_Pin) == GPIO_PIN_RESET) {
+        if (timeout++ > 10000) return 2;
+        delay_us(dht, 1);
+    }
+
+    // Wait for LOW (start of data)
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(dht->GPIOx, dht->GPIO_Pin) == GPIO_PIN_SET) {
+        if (timeout++ > 10000) return 3;
+        delay_us(dht, 1);
+    }
+
+    // Read 40 bits
+    for (int i = 0; i < 40; i++) {
+        // Wait LOW
+        while (HAL_GPIO_ReadPin(dht->GPIOx, dht->GPIO_Pin) == GPIO_PIN_RESET);
+
+        // measure HIGH time
+        __HAL_TIM_SET_COUNTER(dht->htim, 0);
+        while (HAL_GPIO_ReadPin(dht->GPIOx, dht->GPIO_Pin) == GPIO_PIN_SET);
+
+        uint16_t high_time = __HAL_TIM_GET_COUNTER(dht->htim);
+
+        if (high_time > 40) bits[byteIndex] |= (1 << bitIndex);
+
+        if (bitIndex == 0) {
+            bitIndex = 7;
+            byteIndex++;
         } else {
-            i |= (1<<(7-j));
-        }
-        while ((HAL_GPIO_ReadPin (DHT_PORT, DHT_PIN)));
-    }
-    return i;
-}
-
-// Hàm lấy dữ liệu cho DHT22
-uint8_t DHT_GetData (float *Temp, float *Hum) {
-    uint8_t Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, CheckSum;
-    DHT_Start();
-    if (DHT_Check_Response()) {
-        Rh_byte1 = DHT_Read();
-        Rh_byte2 = DHT_Read();
-        Temp_byte1 = DHT_Read();
-        Temp_byte2 = DHT_Read();
-        CheckSum = DHT_Read();
-
-        if (CheckSum == ((Rh_byte1 + Rh_byte2 + Temp_byte1 + Temp_byte2) & 0xFF)) {
-            // Công thức tính cho DHT22 (số 16-bit có dấu)
-            *Hum = (float)((Rh_byte1 << 8) | Rh_byte2) / 10.0f;
-
-            int16_t rawTemp = (Temp_byte1 << 8) | Temp_byte2;
-            if (rawTemp & 0x8000) { // Nếu là nhiệt độ âm
-                *Temp = (float)(rawTemp & 0x7FFF) / -10.0f;
-            } else {
-                *Temp = (float)rawTemp / 10.0f;
-            }
-            return 1; // OK
+            bitIndex--;
         }
     }
-    return 0; // Error
-}
 
+    uint8_t sum = bits[0] + bits[1] + bits[2] + bits[3];
+    if (sum != bits[4]) return 4;  // checksum error
+
+    data->Humidity = (bits[0] << 8 | bits[1]) * 0.1f;
+    data->Temperature = (bits[2] << 8 | bits[3]) * 0.1f;
+
+    return 0;
+}
